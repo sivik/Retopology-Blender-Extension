@@ -1,7 +1,7 @@
 # Retopo Stroke Tool — User Instructions
 
 **Version:** 2.0
-**Blender:** 3.0 +
+**Blender:** 5.0 +
 **Location:** View3D › N-Panel › Retopo Tool
 
 ---

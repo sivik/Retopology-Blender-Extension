@@ -1,5 +1,15 @@
 # Retopo Stroke Tool  — Instrukcja użytkownika
 
+**Version:** 2.0
+**Blender:** 5.0 +
+**Location:** View3D › N-Panel › Retopo Tool
+---
+1. Pobierz `retopology_tool_en.py` (angielski) **lub** `retopology_tool.py` (polski).
+   **Nie** instaluj obu jednocześnie — rejestrują tę samą właściwość sceny.
+2. W Blenderze: **Edit › Preferences › Add-ons › Install…**
+3. Wskaż plik `.py` → kliknij **Install Add-on**.
+4. Zaznacz checkbox obok **„Retopo Stroke Tool (PL)"**.
+5. Panel pojawi się w **N-Panelu** (naciśnij `N` w oknie 3D Viewport) pod zakładką **Retopo Tool**.
 ---
 
 ## Szybki start
