@@ -4,7 +4,7 @@
 **Blender:** 5.0 +
 **Location:** View3D › N-Panel › Retopo Tool
 ---
-1. Pobierz `retopology_tool_en.py` (angielski) **lub** `retopology_tool.py` (polski).
+1. Pobierz `retopology_tool_en.py` (angielski) **lub** `retopology_tool_pl.py` (polski).
    **Nie** instaluj obu jednocześnie — rejestrują tę samą właściwość sceny.
 2. W Blenderze: **Edit › Preferences › Add-ons › Install…**
 3. Wskaż plik `.py` → kliknij **Install Add-on**.
@@ -162,19 +162,32 @@ Włącz **Symetria** i wybierz oś (X / Y / Z) — każdy rysowany stroke automa
 
 ### Guidance — tryby wpływu
 
-Włącz **Użyj jako Guidance** aby stroke'i wpływały na remesh. Dostępne dwa tryby:
+Włącz **Użyj jako Guidance** aby stroke'i wpływały na remesh.
+
+> **Uwaga:** Sekcja Edge Loops jest ukryta w trybie **Decimate** — ten tryb zachowuje oryginalną topologię i nie może korzystać z guidance.
+
+Dostępne trzy tryby:
 
 | Tryb | Działanie | Kiedy używać |
 |---|---|---|
 | **Snap** | Wierzchołki blisko stroke'a skaczą dokładnie NA jego linię → twarde edge loopy | Gdy chcesz wymusić konkretny edge loop w danym miejscu (np. wokół oka, linii ust) |
 | **Field** | Kierunek krawędzi wyrównuje się z tangentą stroke'a bez skakania na niego → miękkie prowadzenie przepływu | Gdy chcesz wpłynąć na ogólny kierunek quadów w danej strefie bez twardych cięć |
+| **Diffuse** | Pole orientacji **propaguje się przez krawędzie siatki** od stroke'a na zewnątrz — wpływ globalny, wygasający z odległością topologiczną | Gdy chcesz by cały mesh podążał za stroke'iem, nie tylko wierzchołki w promieniu |
 
-**Snap — parametr:**
-- **Snap Radius** — promień wpływu (im większy, tym więcej wierzchołków przyciągniętych do stroke'a). Quadratic falloff: pełna siła przy centrum, zero na granicy — bez twardych artefaktów.
+**Snap — parametry:**
+- **Snap Radius** — promień wpływu. Quadratic falloff: pełna siła przy centrum, zero na granicy.
+- **Strength** — mnożnik siły przyciągania (0–1). Zmniejsz przy dużym promieniu aby uniknąć nadmiernej deformacji.
 
 **Field — parametry:**
 - **Influence Radius** — strefa wpływu tangentowego pola stroke'a
 - **Strength** — siła wyrównania (0 = brak efektu, 1 = maksymalne wyrównanie)
+
+**Diffuse — parametry:**
+- **Seed Radius** — promień inicjalnego zasiania pola (= strefa bezpośredniego kontaktu ze stroke'iem)
+- **Seed Strength** — siła startowa w punkcie seeda
+- **Diffusion Steps** — liczba kroków propagacji przez adjacency grafu siatki (1–30, domyślnie 10). Więcej kroków = dalszy zasięg, gładsze przejście na całym meshu.
+
+> **Tip Diffuse:** Tryb Diffuse daje efekt najbliższy temu jak Instant Meshes buduje globalne pole orientacji. Przy małym Seed Radius (0.05) i dużej liczbie Steps (20+) wpływ dociera do całego mesha z gładkim wygaszaniem — bez twardego odcięcia jak w FIELD.
 
 ---
 
@@ -234,6 +247,8 @@ Przed remeshem skanuje krawędzie targetu i oznacza jako **sharp + crease** te, 
 Oznaczone krawędzie są szanowane przez:
 - **Quadriflow** (parametr `Zachowaj Hard Edges`)
 - **Instant Meshes** (parametr `Crease Angle`)
+
+Przycisk **Wyczyść Creases z Targetu** (pojawia się po włączeniu opcji) — resetuje wszystkie oznaczenia sharp/crease na targecie. Użyj go jeśli chcesz cofnąć pre-pass bez uruchamiania ponownego remeshu.
 
 **Kiedy włączyć:** Przy każdym modelu zawierającym ostre przejścia formy — mechaniczne obiekty, pojazdy, architektura, elementy zbroi.
 
@@ -316,7 +331,10 @@ Instant Meshes: Crease Angle 20°, Smooth 1, Dominant Quads ON.
 → Dowolny tryb + **Smooth + Re-project** (8+ iteracji). Wyrówna gęstość bez zmiany kształtu.
 
 ### Chcesz kontrolować kierunek edge loopów
-→ Narysuj stroke'i przed remeshem, włącz **Guidance Snap** dla twardych loopów ALBO **Guidance Field** dla miękkiego wpływu na przepływ quadów. Field działa najlepiej z Quadriflow lub Instant Meshes.
+→ Narysuj stroke'i przed remeshem, następnie wybierz tryb:
+- **Snap** — twarde edge loopy dokładnie na linii stroke'a. Zmniejsz **Strength** jeśli przy dużym Radius siatka deformuje się zbyt mocno.
+- **Field** — miękkie wyrównanie w danej strefie. Zawsze uzupełniaj **Smooth + Re-project** aby zrelaksować rozciągnięte krawędzie.
+- **Diffuse** — globalny wpływ propagowany przez cały mesh. Najlepsze dla złożonych modeli organicznych gdzie przepływ ma podążać za stroke'iem na dużej powierzchni.
 
 ### Model z wyraźnymi detalami w jednych miejscach a płaski w innych
 → Włącz **Curvature Pre-pass** + Quadriflow z `Uwzględnij krzywiznę`. Siatka będzie gęstsza tam gdzie model jest ciekawy, a rzadsza na płaskich ścianach.

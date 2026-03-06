@@ -102,12 +102,19 @@ class RetopoPipelineProps(bpy.types.PropertyGroup):
         default=0.05, min=0.001, max=0.5,
         description="Promień przyciągania wierzchołków do stroke'ów"
     )
+    stroke_snap_strength: bpy.props.FloatProperty(
+        name="Strength",
+        default=1.0, min=0.0, max=1.0,
+        description="Siła przyciągania (0 = brak efektu, 1 = pełne). "
+                    "Zmniejsz przy dużym promieniu aby uniknąć nadmiernej deformacji siatki"
+    )
     stroke_guidance_mode: bpy.props.EnumProperty(
         name="Tryb Guidance",
         description="Snap: przyciąga wierzchołki DO stroke'a. Field: wyrównuje kierunek krawędzi ze stroke'iem",
         items=[
-            ('SNAP',  "Snap",  "Wierzchołki przeskakują na linię stroke'a (twarde edge loopy)",  'SNAP_ON',    0),
-            ('FIELD', "Field", "Krawędzie wyrównują się z tangentą stroke'a (miękkie prowadzenie)", 'FORCE_MAGNETIC', 1),
+            ('SNAP',   "Snap",   "Wierzchołki przeskakują na linię stroke'a (twarde edge loopy)",                          'SNAP_ON',       0),
+            ('FIELD',  "Field",  "Krawędzie wyrównują się z tangentą stroke'a (miękkie prowadzenie)",                      'FORCE_MAGNETIC', 1),
+            ('DIFFUSE',"Diffuse","Propaguje pole orientacji przez krawędzie siatki — gładkie globalne wyrównanie jak IM",  'BRUSH_SOFTEN',  2),
         ],
         default='SNAP'
     )
@@ -120,6 +127,12 @@ class RetopoPipelineProps(bpy.types.PropertyGroup):
         name="Influence Radius",
         default=0.15, min=0.001, max=1.0,
         description="Promień wpływu tangentowego pola stroke'a na otaczające wierzchołki"
+    )
+    stroke_diffusion_iterations: bpy.props.IntProperty(
+        name="Diffusion Steps",
+        default=10, min=1, max=30,
+        description="Liczba kroków propagacji pola orientacji przez krawędzie siatki. "
+                    "Więcej = dalszy zasięg od stroke'a, gładsze przejście na całym meshu"
     )
 
     # ── Ustawienia Instant Meshes ──────────────────────────────
@@ -899,8 +912,8 @@ def apply_stroke_guidance(context, result_obj, target_obj):
         nearest_co, _, dist = kd.find(world_co)
         if dist >= snap_radius:
             continue
-        # Quadratic falloff: siła=1 przy dist=0, siła=0 przy dist=snap_radius
-        weight  = (1.0 - dist / snap_radius) ** 2
+        # Quadratic falloff × strength: siła=1 przy dist=0, siła=0 przy dist=snap_radius
+        weight  = (1.0 - dist / snap_radius) ** 2 * props.stroke_snap_strength
         # Re-project pozycji stroke'a na powierzchnię high-poly
         hit_loc, _, _, _ = target_bvh.find_nearest(nearest_co)
         if hit_loc:
@@ -1013,6 +1026,172 @@ def apply_stroke_guidance_field(context, result_obj, target_obj):
     return influenced
 
 
+def _rosy4_best(nb_t, ref, vn):
+    """Zwraca tę rotację nb_t (0°/90°/180°/270° wokół vn) która najlepiej wyrównuje
+    się z ref. Implementacja 4-RoSy alignment (Instant Meshes / Jakob et al. 2015).
+    Zapobiega anulowaniu się przeciwnych tangentów podczas uśredniania w DIFFUSE."""
+    c1 = vn.cross(nb_t)
+    if c1.length < 1e-6:          # tangent równoległy do normalnej — tylko flip
+        return nb_t if nb_t.dot(ref) >= 0.0 else -nb_t
+    c1 = c1.normalized()
+    best, best_d = nb_t, nb_t.dot(ref)
+    for c in (c1, -nb_t, -c1):   # 90°, 180°, 270°
+        d = c.dot(ref)
+        if d > best_d:
+            best, best_d = c, d
+    return best
+
+
+def apply_stroke_guidance_diffusion(context, result_obj, target_obj):
+    """
+    Post-process po remeshu: propaguje pole orientacji od stroke'ów przez krawędzie
+    siatki (multi-hop diffusion) — efekt globalny jak w Instant Meshes 4-RoSy field.
+
+    Algorytm trzystopniowy:
+      1. SEED   — wierzchołki blisko stroke'a dostają wagę i tangent stroke'a
+      2. DIFFUSE — N iteracji: waga i tangent propagują się przez adjacency grafu
+                   (każdy wierzchołek = średnia ważona sąsiadów × decay)
+      3. APPLY  — per-vertex: przesunięcie ⊥ do tangenty × propagowana_waga → re-project BVH
+
+    Różnica vs FIELD: FIELD ma hard cutoff na promieniu → DIFFUSE dociera do całego
+    meshu z wygaszaniem zależnym od odległości topologicznej (liczby krawędzi).
+    """
+    from mathutils.kdtree import KDTree
+    from mathutils.bvhtree import BVHTree
+
+    props   = context.scene.retopo_props
+    strokes = get_stroke_objects(context)
+    if not strokes:
+        return 0
+
+    # ── Krok 1: sampling stroke'ów ───────────────────────────────────────
+    stroke_segments = []
+    depsgraph = context.evaluated_depsgraph_get()
+    for s in strokes:
+        eval_s = s.evaluated_get(depsgraph)
+        tmp = eval_s.to_mesh()
+        if tmp and len(tmp.vertices) >= 2:
+            mw  = s.matrix_world
+            pts = [mw @ v.co for v in tmp.vertices]
+            for i in range(len(pts) - 1):
+                p0, p1 = pts[i], pts[i + 1]
+                seg_dir = p1 - p0
+                if seg_dir.length < 1e-6:
+                    continue
+                stroke_segments.append((p0, p1, seg_dir.normalized()))
+        eval_s.to_mesh_clear()
+
+    if not stroke_segments:
+        return 0
+
+    kd = KDTree(len(stroke_segments))
+    for i, (p0, p1, _) in enumerate(stroke_segments):
+        kd.insert((p0 + p1) * 0.5, i)
+    kd.balance()
+
+    eval_target = target_obj.evaluated_get(depsgraph)
+    target_bvh  = BVHTree.FromObject(eval_target, depsgraph)
+
+    # ── Krok 2: SEED — inicjalizacja pola przy stroke'ach ────────────────
+    bm = bmesh.new()
+    bm.from_mesh(result_obj.data)
+    bm.verts.ensure_lookup_table()
+
+    seed_radius = props.stroke_field_radius
+    strength    = props.stroke_field_strength
+    mat_world   = result_obj.matrix_world
+    mat_inv     = mat_world.inverted()
+    n_verts     = len(bm.verts)
+
+    # field_tangent[i] = Vector tangent lub None
+    # field_weight[i]  = float [0, 1]
+    field_tangent = [None]  * n_verts
+    field_weight  = [0.0]   * n_verts
+    is_seed       = [False] * n_verts
+
+    for v in bm.verts:
+        world_co = mat_world @ v.co
+        _, idx, dist = kd.find(world_co)
+        if dist <= seed_radius:
+            seg_p0, seg_p1, tangent = stroke_segments[idx]
+            ab = seg_p1 - seg_p0
+            t  = max(0.0, min(1.0, (world_co - seg_p0).dot(ab) / ab.dot(ab)))
+            field_tangent[v.index] = tangent.copy()
+            field_weight [v.index] = (1.0 - dist / seed_radius) * strength
+            is_seed      [v.index] = True
+
+    # ── Krok 3: DIFFUSE — propagacja przez adjacency ─────────────────────
+    # decay ≈ 0.85 na krok → po N krokach: 0.85^N resztkowej wagi
+    decay      = 0.85
+    iterations = props.stroke_diffusion_iterations
+
+    for _ in range(iterations):
+        new_tangent = list(field_tangent)
+        new_weight  = list(field_weight)
+
+        for v in bm.verts:
+            if is_seed[v.index]:
+                continue  # seed zachowuje oryginalną wartość
+
+            acc_t  = Vector((0.0, 0.0, 0.0))
+            acc_w  = 0.0
+            total  = 0.0
+            # Normalna wierzchołka w przestrzeni świata (potrzebna do obrotów 4-RoSy)
+            vn  = (mat_world.to_3x3() @ v.normal).normalized()
+            ref = None  # referencja 4-RoSy — ustawi pierwszy sąsiad z wagą > 0
+
+            for e in v.link_edges:
+                nb   = e.other_vert(v)
+                w_nb = field_weight[nb.index]
+                nb_t = field_tangent[nb.index]
+                if nb_t is not None and w_nb > 1e-8:
+                    # 4-RoSy: wybierz obrót nb_t (0/90/180/270°) najbliższy ref
+                    if ref is None:
+                        ref     = nb_t      # pierwszy sąsiad → ustala referencję
+                        aligned = nb_t
+                    else:
+                        aligned = _rosy4_best(nb_t, ref, vn)
+                    acc_t += aligned * w_nb
+                    acc_w += w_nb
+                    if acc_t.length > 1e-8:  # aktualizuj ref do bieżącej średniej
+                        ref = acc_t.normalized()
+                total += 1.0
+
+            if total > 0 and acc_t.length > 1e-8:
+                new_tangent[v.index] = acc_t.normalized()
+                new_weight [v.index] = (acc_w / total) * decay
+
+        field_tangent = new_tangent
+        field_weight  = new_weight
+
+    # ── Krok 4: APPLY — przesunięcie wzdłuż pola + re-project ───────────
+    influenced = 0
+    for v in bm.verts:
+        w = field_weight[v.index]
+        if w < 1e-6 or field_tangent[v.index] is None:
+            continue
+
+        world_co = mat_world @ v.co
+        _, idx, _ = kd.find(world_co)
+        seg_p0, seg_p1, _ = stroke_segments[idx]
+        ab  = seg_p1 - seg_p0
+        t   = max(0.0, min(1.0, (world_co - seg_p0).dot(ab) / ab.dot(ab)))
+        foot = seg_p0 + t * ab
+        perp = foot - world_co          # kierunek do stroke'a
+
+        new_co = world_co + perp * w
+        hit_loc, _, _, _ = target_bvh.find_nearest(new_co)
+        if hit_loc:
+            v.co = mat_inv @ hit_loc
+            influenced += 1
+
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    bm.to_mesh(result_obj.data)
+    bm.free()
+    result_obj.data.update()
+    return influenced
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # OPERATOR: BAKE CURVATURE MAP  (#3)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1035,6 +1214,44 @@ class RETOPO_OT_BakeCurvatureMap(bpy.types.Operator):
             mesh.vertex_colors.active = mesh.vertex_colors[layer]
         self.report({'INFO'}, f"✅ Curvature baked → warstwa '{layer}' "
                               f"(czerwony=gęsto, niebieski=rzadko)")
+        return {'FINISHED'}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OPERATOR: WYCZYŚĆ CREASES Z TARGETU
+# ─────────────────────────────────────────────────────────────────────────────
+
+class RETOPO_OT_ClearHardEdges(bpy.types.Operator):
+    """Czyści oznaczenia crease/sharp z krawędzi High-Poly Target (cofnięcie Hard Edge Pre-pass)"""
+    bl_idname  = "retopo.clear_hard_edges"
+    bl_label   = "Wyczyść Creases z Targetu"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.retopo_props
+        if not _obj_in_scene(props.target_object):
+            props.target_object = None
+            self.report({'WARNING'}, "Wybierz High-Poly Target!")
+            return {'CANCELLED'}
+        target = props.target_object
+
+        bm = bmesh.new()
+        bm.from_mesh(target.data)
+        if hasattr(bm.edges.layers, 'crease'):
+            crease_layer = bm.edges.layers.crease.verify()
+        else:
+            crease_layer = (bm.edges.layers.float.get("crease_edge") or
+                            bm.edges.layers.float.new("crease_edge"))
+        cleared = 0
+        for e in bm.edges:
+            if e[crease_layer] > 0.0 or not e.smooth:
+                e[crease_layer] = 0.0
+                e.smooth = True
+                cleared += 1
+        bm.to_mesh(target.data)
+        bm.free()
+        target.data.update()
+        self.report({'INFO'}, f"Wyczyszczono {cleared} krawędzi (crease/sharp → reset)")
         return {'FINISHED'}
 
 
@@ -1325,6 +1542,10 @@ class RETOPO_OT_ExecuteRetopo(bpy.types.Operator):
                     snapped = apply_stroke_guidance_field(context, result, target)
                     if snapped:
                         self.report({'INFO'}, f"Field guidance: {snapped} wierzchołków wyrównanych")
+                elif props.stroke_guidance_mode == 'DIFFUSE':
+                    snapped = apply_stroke_guidance_diffusion(context, result, target)
+                    if snapped:
+                        self.report({'INFO'}, f"Diffuse guidance: {snapped} wierzchołków wyrównanych")
                 else:
                     snapped = apply_stroke_guidance(context, result, target)
                     if snapped:
@@ -1913,40 +2134,39 @@ class RETOPO_PT_MainPanel(bpy.types.Panel):
 
         layout.separator()
 
-        # ── Stroke'i (opcjonalne edge loops) ───────────────────
-        box = layout.box()
-        row = box.row()
-        row.label(text=f"Edge Loops ({len(strokes)})", icon='CURVE_BEZCURVE')
+        # ── Stroke'i (opcjonalne edge loops) — ukryte dla DECIMATE ─
+        if mode != 'DECIMATE':
+            box = layout.box()
+            row = box.row()
+            row.label(text=f"Edge Loops ({len(strokes)})", icon='CURVE_BEZCURVE')
 
-        if not _obj_in_scene(props.target_object):
-            box.label(text="Wybierz Target aby rysować", icon='INFO')
-        elif props.is_drawing:
-            box.label(text="Rysowanie aktywne...", icon='REC')
-        else:
-            btn = box.row()
-            btn.scale_y = 1.4
-            btn.operator("retopo.draw_stroke",
-                         text="+ Narysuj Edge Loop",
-                         icon='CURVE_BEZCURVE')
-            # Symetria
-            sym_row = box.row(align=True)
-            sym_row.prop(props, "stroke_use_symmetry", toggle=True, icon='MOD_MIRROR')
-            if props.stroke_use_symmetry:
-                sym_row.prop(props, "stroke_symmetry_axis", expand=True)
+            if not _obj_in_scene(props.target_object):
+                box.label(text="Wybierz Target aby rysować", icon='INFO')
+            elif props.is_drawing:
+                box.label(text="Rysowanie aktywne...", icon='REC')
+            else:
+                btn = box.row()
+                btn.scale_y = 1.4
+                btn.operator("retopo.draw_stroke",
+                             text="+ Narysuj Edge Loop",
+                             icon='CURVE_BEZCURVE')
+                # Symetria
+                sym_row = box.row(align=True)
+                sym_row.prop(props, "stroke_use_symmetry", toggle=True, icon='MOD_MIRROR')
+                if props.stroke_use_symmetry:
+                    sym_row.prop(props, "stroke_symmetry_axis", expand=True)
 
-        if strokes:
-            box.template_list(
-                "RETOPO_UL_StrokeList", "",
-                bpy.data, "objects",
-                props, "active_stroke_index",
-                rows=3, maxrows=5,
-            )
-            row = box.row(align=True)
-            row.operator("retopo.delete_stroke",   text="Usuń",    icon='X')
-            row.operator("retopo.clear_strokes",   text="Wyczyść", icon='TRASH')
+            if strokes:
+                box.template_list(
+                    "RETOPO_UL_StrokeList", "",
+                    bpy.data, "objects",
+                    props, "active_stroke_index",
+                    rows=3, maxrows=5,
+                )
+                row = box.row(align=True)
+                row.operator("retopo.delete_stroke",   text="Usuń",    icon='X')
+                row.operator("retopo.clear_strokes",   text="Wyczyść", icon='TRASH')
 
-            # ── Stroke Guidance — ukryte dla DECIMATE ──────────
-            if mode != 'DECIMATE':
                 guidance_row = box.row()
                 guidance_row.prop(
                     props, "use_stroke_guidance",
@@ -1958,10 +2178,27 @@ class RETOPO_PT_MainPanel(bpy.types.Panel):
                     mode_row = box.row(align=True)
                     mode_row.prop(props, "stroke_guidance_mode", expand=True)
                     if props.stroke_guidance_mode == 'SNAP':
-                        box.prop(props, "stroke_snap_radius", slider=True)
-                    else:
-                        box.prop(props, "stroke_field_radius", slider=True)
+                        box.prop(props, "stroke_snap_radius",   slider=True)
+                        box.prop(props, "stroke_snap_strength", slider=True)
+                    elif props.stroke_guidance_mode == 'FIELD':
+                        box.prop(props, "stroke_field_radius",   slider=True)
                         box.prop(props, "stroke_field_strength", slider=True)
+                        if not props.use_smooth_reproject:
+                            box.label(
+                                text="↳ Zalecane: włącz Smooth+Reproject",
+                                icon='INFO'
+                            )
+                    else:  # DIFFUSE
+                        box.prop(props, "stroke_field_radius",          slider=True,
+                                 text="Seed Radius")
+                        box.prop(props, "stroke_field_strength",        slider=True,
+                                 text="Seed Strength")
+                        box.prop(props, "stroke_diffusion_iterations",  slider=True)
+                        if not props.use_smooth_reproject:
+                            box.label(
+                                text="↳ Zalecane: włącz Smooth+Reproject",
+                                icon='INFO'
+                            )
 
         layout.separator()
 
@@ -1988,6 +2225,8 @@ class RETOPO_PT_MainPanel(bpy.types.Panel):
             col.prop(props, "use_hard_edge_prepass", toggle=True, icon='EDGESEL')
             if props.use_hard_edge_prepass:
                 col.prop(props, "hard_edge_angle", slider=True)
+                col.operator("retopo.clear_hard_edges",
+                             text="Wyczyść Creases z Targetu", icon='X')
 
         # Smooth + Re-project — ukryte dla DECIMATE i SHRINKWRAP
         if mode not in ('DECIMATE', 'SHRINKWRAP'):
@@ -2155,6 +2394,7 @@ classes = [
     RetopoPipelineProps,
     RETOPO_UL_StrokeList,
     RETOPO_OT_BakeCurvatureMap,
+    RETOPO_OT_ClearHardEdges,
     RETOPO_OT_DrawStroke,
     RETOPO_OT_DeleteStroke,
     RETOPO_OT_ClearStrokes,

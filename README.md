@@ -10,9 +10,9 @@ A Blender addon for semi-automatic retopology with 6 remesh modes, edge loop dra
 
 | File | Description |
 |---|---|
-| `retopology_tool.py` | Addon — Polish UI |
+| `retopology_tool_pl.py` | Addon — Polish UI |
 | `retopology_tool_en.py` | Addon — English UI |
-| `INSTRUKCJA.md` | Full user documentation (Polish) |
+| `RETOPO_INSTRUCTIONS_PL.md` | Full user documentation (Polish) |
 | `RETOPO_INSTRUCTIONS_EN.md` | Full user documentation (English) |
 
 > **Do not install both language versions at the same time** — they register the same `scene.retopo_props` property and will conflict.
@@ -22,7 +22,7 @@ A Blender addon for semi-automatic retopology with 6 remesh modes, edge loop dra
 ## Installation
 
 1. Open Blender → **Edit › Preferences › Add-ons › Install…**
-2. Select `retopology_tool_en.py` (English) or `retopology_tool.py` (Polish)
+2. Select `retopology_tool_en.py` (English) or `retopology_tool_pl.py` (Polish)
 3. Enable the checkbox next to **Retopo Stroke Tool**
 4. The panel appears in the **N-Panel** (`N` key in 3D Viewport) → **Retopo Tool** tab
 
@@ -110,23 +110,27 @@ Need retopology?
 │        + enable Hard Edge Pre-pass in Advanced
 │
 ├─ Just reduce poly count, keep topology?
-│   └─► Decimate
+│   └─► Decimate  (Edge Loops not available in this mode)
 │
 └─ Quick base mesh for sculpting?
     └─► Voxel Remesh
+
+Want to control edge loop placement?
+│
+├─ Hard, precise loop at exact stroke position?
+│   └─► Stroke Guidance: Snap  (+ Snap Strength to tune pull force)
+│
+├─ Soft directional influence within a radius?
+│   └─► Stroke Guidance: Field
+│
+└─ Global influence propagating through entire mesh (IM-like)?
+    └─► Stroke Guidance: Diffuse  (+ Diffusion Steps to control reach)
 ```
 
 ---
 
 ## Version History
-
-| Session | Changes |
-|---|---|
-| 1–2 | Quadriflow params, Instant Meshes CLI flags, Voxel Adaptivity, Hard Edge Pre-pass, Laplacian Smooth+Reproject, LOD Chain, Topology Metrics, Symmetric Strokes, Stroke Field Guidance |
-| 3 | Curvature Pre-pass (Gaussian + Mean), math fixes (#11–#14): Voronoi area normalization, Scaled Jacobian, closest-point-on-segment, quadratic snap falloff |
-| 4–5 | QuadWild mode (subprocess), Mesh Healing pre-pass, Cotangent Laplacian smooth |
-| 6 | QRemeshify integration (auto-detect, bundled binary), mode-specific Advanced panel visibility, Blender 4.0+ crease layer fix, English addon + documentation |
-
+0.0.2
 ---
 
 ## License

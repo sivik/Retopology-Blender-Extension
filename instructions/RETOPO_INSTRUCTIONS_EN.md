@@ -8,7 +8,7 @@
 
 ## Installation
 
-1. Download `retopology_tool_en.py` (English) **or** `retopology_tool.py` (Polish).
+1. Download `retopology_tool_en.py` (English) **or** `retopology_tool_pl.py` (Polish).
    Do **not** install both at the same time — they register the same scene property.
 2. In Blender: **Edit › Preferences › Add-ons › Install…**
 3. Select the `.py` file → click **Install Add-on**.
@@ -125,21 +125,33 @@ Enable **Symmetry** before drawing to automatically mirror each stroke across th
 Mirror strokes appear in green.
 
 ### Stroke Guidance *(not available for Decimate)*
-After remesh, vertices near strokes are pulled toward the drawn lines.
 
-| Mode | Effect |
-|---|---|
-| **Snap** | Vertices jump directly onto the stroke line → hard edge loops |
-| **Field** | Edge flow aligns with the stroke tangent → soft directional guidance |
+> **Note:** The entire Edge Loops section is hidden in **Decimate** mode — that mode preserves original topology and cannot use guidance.
+
+After remesh, vertices are influenced by the drawn strokes. Three modes available:
+
+| Mode | Effect | When to use |
+|---|---|---|
+| **Snap** | Vertices jump directly onto the stroke line → hard edge loops | Force a specific loop at an exact location (eye socket, lip line) |
+| **Field** | Edge flow aligns with the stroke tangent within a fixed radius → soft guidance | Influence quad flow direction in a zone without hard cuts |
+| **Diffuse** | Orientation field **propagates through mesh edges** from the stroke outward — global reach, falls off with topological distance | When you want the entire mesh to follow the stroke, not just nearby vertices |
 
 **Snap settings:**
-- **Snap Radius** — influence radius; vertices outside are unaffected
+- **Snap Radius** — influence radius; quadratic falloff, no hard cutoff artifact
+- **Strength** — pull multiplier (0–1). Reduce at large radius to avoid over-pulling distortion.
 
 **Field settings:**
-- **Influence Radius** — how far from the stroke the field has effect
-- **Strength** — how strongly edges align with the stroke direction (0 = none, 1 = full)
+- **Influence Radius** — zone of effect around the stroke
+- **Strength** — alignment strength (0 = none, 1 = full)
 
-> **Tip:** Run Stroke Guidance before Smooth + Re-project for best results. The smooth pass will then relax any stretched edges while keeping vertices on the surface.
+**Diffuse settings:**
+- **Seed Radius** — initial seeding radius (direct contact zone with the stroke)
+- **Seed Strength** — starting weight at the seed
+- **Diffusion Steps** — number of propagation hops through mesh adjacency (1–30, default 10). More steps = wider reach and smoother transition across the whole mesh.
+
+> **Tip:** Always run **Smooth + Re-project** after any Guidance mode to relax stretched edges while keeping vertices on the high-poly surface.
+
+> **Diffuse tip:** Most similar to how Instant Meshes builds its global orientation field. With a small Seed Radius (0.05) and high Steps (20+), influence reaches the entire mesh with smooth falloff — no hard cutoff like Field mode.
 
 ---
 
@@ -168,6 +180,8 @@ Click **Bake Now** to update the maps without running a full retopo.
 Scans all edges of the target and marks those whose dihedral angle exceeds **Crease Angle** as **sharp + crease**.
 - Quadriflow respects these via `Preserve Hard Edges`
 - Instant Meshes uses them via the `--crease` flag
+
+The **Clear Creases from Target** button (appears below the angle slider) resets all sharp/crease markings on the target. Use it to undo the pre-pass without re-running a full retopo.
 
 ### Smooth + Re-project *(Voxel, Quadriflow, Instant Meshes, QuadWild)*
 Iterative post-process after remesh:
@@ -213,7 +227,7 @@ Icons: ✓ = good, ⚠ = acceptable, ✗ = poor.
 **For characters / organic models:**
 - Use **Quadriflow** or **QuadWild** for best automatic edge flow.
 - Draw strokes along major muscle lines (eye socket, lip corners, brow) before running.
-- Enable **Stroke Guidance: Snap** for hard edge loops, **Field** for soft directional influence.
+- Enable **Stroke Guidance: Snap** for hard edge loops, **Field** for soft directional influence, **Diffuse** for global mesh-wide influence propagation.
 - Set **Symmetry** axis to X before drawing for symmetric topology.
 
 **For hard-surface / mechanical parts:**
@@ -262,7 +276,13 @@ Uses **cotangent-weighted Laplacian** (not uniform), which avoids the shrinkage 
 Projects each result vertex onto the nearest stroke segment (closest-point-on-segment, `t ∈ [0,1]`) and reduces the perpendicular component of the displacement vector, weighted by a linear falloff within the influence radius (ACM SIGGRAPH 2021 "Reliable Feature-Line Driven Quad-Remeshing").
 
 ### Stroke Guidance — Snap Mode
-Projects the nearest stroke point onto the high-poly BVH surface, then interpolates the vertex toward that projected position using a **quadratic falloff** `(1 − d/r)²` — eliminating the step discontinuity of a hard distance cutoff.
+Projects the nearest stroke point onto the high-poly BVH surface, then interpolates the vertex toward that projected position using a **quadratic falloff** `(1 − d/r)² × strength` — eliminating the step discontinuity of a hard distance cutoff. The `strength` multiplier provides independent control over pull intensity.
+
+### Stroke Guidance — Diffuse Mode
+Three-phase algorithm inspired by Instant Meshes' 4-RoSy orientation field propagation:
+1. **Seed** — vertices within `seed_radius` of a stroke receive the stroke tangent and a weight `(1 − d/r) × strength`.
+2. **Diffuse** — for `N` iterations, each non-seed vertex receives the weighted average of its neighbours' tangents and weights, multiplied by a per-hop decay factor of 0.85. This propagates influence through the mesh graph without a hard radius cutoff.
+3. **Apply** — each vertex with propagated weight > 0 is displaced by `perp × weight` toward the stroke, then re-projected onto the high-poly BVH surface.
 
 ---
 
