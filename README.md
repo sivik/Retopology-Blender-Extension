@@ -2,7 +2,7 @@
 
 A Blender addon for semi-automatic retopology with 6 remesh modes, edge loop drawing, stroke guidance, curvature maps, LOD generation, and topology quality metrics.
 
-**Blender:** 3.0 +  &nbsp;|&nbsp; **Platform:** Windows / macOS / Linux
+**Blender:** 5.0 +  &nbsp;|&nbsp; **Platform:** Windows / macOS / Linux
 
 ---
 
